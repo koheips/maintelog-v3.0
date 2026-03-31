@@ -11,7 +11,7 @@
 ・ 変更後は Safari で通常表示を確認してから ホーム画面追加アプリで確認
 
 反映確認
-・ https://koheips.github.io/maintelog-v16/?v=v16b-2026-03-30
+・ https://koheips.github.io/maintelog-v16/?v=v16c-2026-03-30
 ・ 履歴カードに「編集」ボタン（青色）が表示されること
 ・ 作業内容マスターに ⠿ ドラッグハンドルが表示されること
 ・ カラーピッカーに白い円枠が表示されること（黒背景での視認性）
@@ -23,10 +23,10 @@ PCブラウザで反映されない場合:
 
 iPhoneホーム画面アプリで反映されない場合:
   1. アプリスイッチャーでアプリを完全終了
-  2. Safariで ?v=v16b-2026-03-30 付きURLにアクセス
+  2. Safariで ?v=v16c-2026-03-30 付きURLにアクセス
   3. 再度ホーム画面に追加し直す
 
-v16b 変更内容
+v16c 追加変更内容
 ・ 動的CSS注入（ensureDynamicStylesV5）を完全廃止
   → 全スタイルをindex.htmlの<style>に一元統合（反映確実性を向上）
 ・ localStorage 超過を try-catch で捕捉しユーザーに警告
@@ -40,3 +40,5 @@ v16b 変更内容
 ・ 作業内容マスターの並び替えをドラッグ＆ドロップ（PC）＋タッチ（iPhone）に変更
 ・ Service Workerをstale-while-revalidateに変更
 ・ フッタに著作権表記を追加（©Kohei Sekine (2026)）
+
+・ 区分マスターの上下移動をドラッグ&ドロップ（PC）＋タッチ（iPhone）に変更（上へ/下へボタン廃止）

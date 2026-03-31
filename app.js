@@ -1,4 +1,4 @@
-/* メンテログ app.js  v16b-2026-03-30
+/* メンテログ app.js  v16c-2026-03-30
    動的CSS注入を完全廃止 → 全スタイルはindex.htmlに集約
    主な変更:
    ・localStorage 超過を try-catch で保護
@@ -11,7 +11,7 @@
    ・作業内容マスターをドラッグ＆ドロップ並び替えに変更
 */
 
-const BUILD_ID  = "v16b-2026-03-30";
+const BUILD_ID  = "v16c-2026-03-30";
 console.info("[maintelog] build", BUILD_ID);
 
 const STORAGE_KEY = "maintelog_rows_v2";
@@ -614,26 +614,79 @@ function setupMasterCollapsibles() {
     row.appendChild(inp); row.appendChild(add);
     const list=document.createElement("div"); list.style.marginTop="10px";
     const rerenderAll=()=>{ renderTaskChips();renderMaster();renderReco();renderHistory(); };
+    let catDragSrcIdx = null;
     const renderCats=()=>{
       const cats=getCats(); list.innerHTML="";
       cats.forEach((c,idx)=>{
-        const r=document.createElement("div"); r.className="miniRow"; r.style.margin="6px 0";
+        const r=document.createElement("div");
+        r.className="masterItem"; r.draggable=true; r.dataset.idx=idx;
+        r.style.padding="8px 4px";
+
+        /* ドラッグハンドル */
+        const handle=document.createElement("span");
+        handle.className="drag-handle"; handle.textContent="⠿"; handle.title="ドラッグして並び替え";
+
+        /* 区分名 pill */
         const pill=document.createElement("span"); pill.className="pill"; pill.textContent=c;
-        const up=document.createElement("button"); up.type="button"; up.className="small"; up.textContent="上へ"; up.disabled=idx===0;
-        const dn=document.createElement("button"); dn.type="button"; dn.className="small"; dn.textContent="下へ"; dn.disabled=idx===cats.length-1;
+
+        /* 削除ボタン */
         const dl=document.createElement("button"); dl.type="button"; dl.className="small danger"; dl.textContent="削除";
-        up.addEventListener("click",()=>{ const a=getCats(); if(idx<=0)return; [a[idx-1],a[idx]]=[a[idx],a[idx-1]]; saveCats(a);renderCats();rerenderAll(); });
-        dn.addEventListener("click",()=>{ const a=getCats(); if(idx>=a.length-1)return; [a[idx+1],a[idx]]=[a[idx],a[idx+1]]; saveCats(a);renderCats();rerenderAll(); });
         dl.addEventListener("click",()=>{
           const cn=getCats(); if(cn.length<=1){showAlert("確認","区分は最低1つ必要");return;}
-          showDeleteConfirm("区分を削除",()=>{
+          showDeleteConfirm("区分「"+c+"」を削除しますか？",()=>{
             const next=cn.filter(x=>x!==c); saveCats(next);
             const ts=loadTasks(),fb=next[0]||"その他";
             ts.forEach(t=>{ if(String(t.cat??"")===c) t.cat=fb; }); saveTasks(ts);
             renderCats(); rerenderAll();
           },()=>{});
         });
-        r.appendChild(pill);r.appendChild(up);r.appendChild(dn);r.appendChild(dl); list.appendChild(r);
+
+        r.appendChild(handle); r.appendChild(pill); r.appendChild(dl);
+        list.appendChild(r);
+
+        /* ── ドラッグイベント（PC） ── */
+        r.addEventListener("dragstart",e=>{
+          catDragSrcIdx=idx; r.classList.add("dragging"); e.dataTransfer.effectAllowed="move";
+        });
+        r.addEventListener("dragend",()=>{
+          r.classList.remove("dragging");
+          list.querySelectorAll(".masterItem").forEach(el=>el.classList.remove("drag-over"));
+        });
+        r.addEventListener("dragover",e=>{
+          e.preventDefault(); e.dataTransfer.dropEffect="move";
+          list.querySelectorAll(".masterItem").forEach(el=>el.classList.remove("drag-over"));
+          r.classList.add("drag-over");
+        });
+        r.addEventListener("drop",e=>{
+          e.preventDefault();
+          if(catDragSrcIdx===null||catDragSrcIdx===idx) return;
+          const a=getCats(); const [moved]=a.splice(catDragSrcIdx,1); a.splice(idx,0,moved);
+          saveCats(a); renderCats(); rerenderAll();
+        });
+
+        /* ── タッチ並び替え（iPhone） ── */
+        let touchDragging=false;
+        handle.addEventListener("touchstart",e=>{ touchDragging=true; r.classList.add("dragging"); e.stopPropagation(); },{passive:true});
+        handle.addEventListener("touchmove",e=>{
+          if(!touchDragging) return; e.preventDefault();
+          const y=e.touches[0].clientY;
+          list.querySelectorAll(".masterItem").forEach(el=>el.classList.remove("drag-over"));
+          const target=Array.from(list.querySelectorAll(".masterItem")).find(el=>{
+            const rc=el.getBoundingClientRect(); return y>=rc.top&&y<=rc.bottom;
+          });
+          if(target&&target!==r) target.classList.add("drag-over");
+        },{passive:false});
+        handle.addEventListener("touchend",e=>{
+          if(!touchDragging) return; touchDragging=false; r.classList.remove("dragging");
+          const y=e.changedTouches[0].clientY;
+          list.querySelectorAll(".masterItem").forEach(el=>el.classList.remove("drag-over"));
+          const items=Array.from(list.querySelectorAll(".masterItem"));
+          const targetEl=items.find(el=>{ const rc=el.getBoundingClientRect(); return y>=rc.top&&y<=rc.bottom; });
+          if(!targetEl||targetEl===r) return;
+          const toIdx=Number(targetEl.dataset.idx); if(isNaN(toIdx)||toIdx===idx) return;
+          const a=getCats(); const [moved]=a.splice(idx,1); a.splice(toIdx,0,moved);
+          saveCats(a); renderCats(); rerenderAll();
+        });
       });
     };
     add.addEventListener("click",()=>{

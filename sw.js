@@ -1,5 +1,5 @@
-/* maintelog sw v16b-2026-03-30 */
-const CACHE_NAME = "maintelog-v16b-2026-03-30";
+/* maintelog sw v16c-2026-03-30 */
+const CACHE_NAME = "maintelog-v16c-2026-03-30";
 const CORE_ASSETS = [
   "./","./index.html","./app.js","./manifest.json",
   "./icon-192.png","./icon-512.png","./apple-touch-icon.png"

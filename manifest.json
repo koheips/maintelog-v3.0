@@ -1,7 +1,7 @@
 {
   "name": "メンテログ",
   "short_name": "メンテログ",
-  "start_url": "./?v=v16b-2026-03-30",
+  "start_url": "./?v=v16c-2026-03-30",
   "display": "standalone",
   "background_color": "#0b0b0b",
   "theme_color": "#0b0b0b",
