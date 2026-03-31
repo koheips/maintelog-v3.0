@@ -1,1346 +1,732 @@
-/* メンテログ v3
-  変更点
-  ・作業内容マスターを 3区分で保持
-  ・マスターの表示順入替 上へ 下へ
-  ・表示色 任意設定
-  ・推奨頻度 日数 をマスターに保持し 次回推奨作業を算出
-  ・アプリ名を端末内で変更可能
-  ・既存 localStorage 互換を維持
+/* メンテログ app.js  v16b-2026-03-30
+   動的CSS注入を完全廃止 → 全スタイルはindex.htmlに集約
+   主な変更:
+   ・localStorage 超過を try-catch で保護
+   ・JSON インポートのスキーマ検証強化
+   ・crypto.randomUUID() で ID 生成
+   ・tasksByCat のハードコード区分を除去
+   ・.recoItem スタイル定義（index.html側）
+   ・履歴の「編集」ボタン追加
+   ・カラーピッカーにリアルタイムプレビュー追加（枠線はCSS側）
+   ・作業内容マスターをドラッグ＆ドロップ並び替えに変更
 */
 
-const BUILD_ID = "v15-2026-03-02";
+const BUILD_ID  = "v16b-2026-03-30";
 console.info("[maintelog] build", BUILD_ID);
 
-const STORAGE_KEY = "maintelog_rows_v2";      // 互換維持
-const TASKS_KEY = "maintelog_tasks_v2";       // 互換維持
+const STORAGE_KEY = "maintelog_rows_v2";
+const TASKS_KEY   = "maintelog_tasks_v2";
 const APPNAME_KEY = "maintelog_appname_v3";
-const APP_BUILD = "2026-02-27-v14";
+const CATS_KEY    = "maintelog_cats_v1";
+const DEFAULT_CATS = ["掃除","洗濯","その他"];
 
-const CATS_KEY = "maintelog_cats_v1";          // 新規 既存と衝突しない
+/* ── ストレージ安全ラッパー ── */
+function safeSet(key, value) {
+  try {
+    localStorage.setItem(key, value);
+    return true;
+  } catch (_) {
+    showAlert("ストレージエラー",
+      "端末の空き容量が不足しています。JSONエクスポートでバックアップ後、不要データを削除してください。");
+    return false;
+  }
+}
 
-const DEFAULT_CATS = ["掃除", "洗濯", "その他"];
-
+/* ── 区分マスター ── */
 function loadCats() {
   try {
     const raw = localStorage.getItem(CATS_KEY);
     if (!raw) return DEFAULT_CATS.slice();
     const arr = JSON.parse(raw);
-    if (Array.isArray(arr) && arr.length > 0) {
-      // 文字列のみ、重複除去、空除去
-      const out = [];
-      const seen = new Set();
-      arr.forEach(v => {
-        const s = String(v ?? "").trim();
-        if (!s) return;
-        if (seen.has(s)) return;
-        seen.add(s);
-        out.push(s);
-      });
-      return out.length > 0 ? out : DEFAULT_CATS.slice();
-    }
-    return DEFAULT_CATS.slice();
-  } catch (_) {
-    return DEFAULT_CATS.slice();
-  }
+    if (!Array.isArray(arr) || !arr.length) return DEFAULT_CATS.slice();
+    const out = [], seen = new Set();
+    arr.forEach(v => { const s = String(v ?? "").trim(); if (s && !seen.has(s)) { seen.add(s); out.push(s); } });
+    return out.length ? out : DEFAULT_CATS.slice();
+  } catch (_) { return DEFAULT_CATS.slice(); }
 }
-
 function saveCats(cats) {
-  const out = [];
-  const seen = new Set();
-  (cats || []).forEach(v => {
-    const s = String(v ?? "").trim();
-    if (!s) return;
-    if (seen.has(s)) return;
-    seen.add(s);
-    out.push(s);
-  });
-  localStorage.setItem(CATS_KEY, JSON.stringify(out.length ? out : DEFAULT_CATS.slice()));
+  const out = [], seen = new Set();
+  (cats || []).forEach(v => { const s = String(v ?? "").trim(); if (s && !seen.has(s)) { seen.add(s); out.push(s); } });
+  safeSet(CATS_KEY, JSON.stringify(out.length ? out : DEFAULT_CATS.slice()));
 }
-
-function getCats() {
-  return loadCats();
-}
-
+function getCats() { return loadCats(); }
 
 function syncNewCatSelect() {
   const sel = document.getElementById("newCat");
   if (!sel) return;
   const cats = getCats();
   sel.innerHTML = "";
-  const arr = (cats && cats.length) ? cats : ["その他"];
-  arr.forEach(c => {
-    const opt = document.createElement("option");
-    opt.value = c;
-    opt.textContent = c;
-    sel.appendChild(opt);
+  (cats.length ? cats : ["その他"]).forEach(c => {
+    const o = document.createElement("option");
+    o.value = o.textContent = c;
+    sel.appendChild(o);
   });
-  if (!sel.value && sel.options.length) {
-    sel.value = sel.options[0].value;
-  }
+  if (!sel.value && sel.options.length) sel.value = sel.options[0].value;
 }
 
+/* ── デフォルト作業名 ── */
+const defaultTaskNames = ["拭き掃除","掃除機","風呂","トイレ","洗濯","庭"];
+const $ = id => document.getElementById(id);
 
-const defaultTaskNames = [
-  "拭き掃除",
-  "掃除機",
-  "風呂",
-  "トイレ",
-  "洗濯",
-  "庭"
-];
-
-const $ = (id) => document.getElementById(id);
-
-
-
+/* ── モーダル ── */
 function openModal(opts) {
-  const ov = $("modalOverlay");
-  const body = $("modalBody");
-  const ttl = $("modalTitle");
-  const okBtn = $("modalOk");
-  const cancelBtn = $("modalCancel");
-
+  const ov = $("modalOverlay"), body = $("modalBody"), ttl = $("modalTitle");
+  const okBtn = $("modalOk"), canBtn = $("modalCancel");
   ttl.textContent = opts.title || "";
   body.innerHTML = "";
-
-  if (opts.bodyNodes) {
-    opts.bodyNodes.forEach(n => body.appendChild(n));
-  }
-
-  okBtn.textContent = opts.okText || "OK";
-  cancelBtn.textContent = opts.cancelText || "キャンセル";
-
-  cancelBtn.style.display = opts.hideCancel ? "none" : "";
+  if (opts.bodyNodes) opts.bodyNodes.forEach(n => body.appendChild(n));
+  okBtn.textContent  = opts.okText     || "OK";
+  canBtn.textContent = opts.cancelText || "キャンセル";
+  canBtn.style.display = opts.hideCancel ? "none" : "";
   document.body.style.overflow = "hidden";
   ov.classList.remove("hidden");
-
   const cleanup = () => {
-    okBtn.onclick = null;
-    cancelBtn.onclick = null;
+    okBtn.onclick = canBtn.onclick = null;
     ov.classList.add("hidden");
-    cancelBtn.style.display = "";
+    canBtn.style.display = "";
     document.body.style.overflow = "";
   };
-
-  okBtn.onclick = () => { cleanup(); opts.onOk && opts.onOk(); };
-  cancelBtn.onclick = () => { cleanup(); opts.onCancel && opts.onCancel(); };
-
+  okBtn.onclick  = () => { cleanup(); opts.onOk    && opts.onOk();    };
+  canBtn.onclick = () => { cleanup(); opts.onCancel && opts.onCancel(); };
   const first = body.querySelector("input,select,textarea,button");
   if (first) setTimeout(() => first.focus(), 50);
 }
 
 function showModal(title, fields, onOk, onCancel) {
-  const nodes = [];
-  const values = {};
-  fields.forEach(f => {
+  const nodes = {}, els = {};
+  const nodeArr = fields.map(f => {
     const wrap = document.createElement("div");
+    wrap.style.marginBottom = "10px";
     const lab = document.createElement("label");
-    lab.textContent = f.label;
-    lab.style.display = "block";
-    lab.style.marginBottom = "6px";
+    lab.textContent = f.label; lab.style.cssText = "display:block;margin-bottom:4px;font-size:13px;opacity:0.75;";
     wrap.appendChild(lab);
-
     let el;
     if (f.type === "select") {
       el = document.createElement("select");
       (f.options || []).forEach(opt => {
-        const o = document.createElement("option");
-        o.value = opt;
-        o.textContent = opt;
-        if (opt === f.value) o.selected = true;
-        el.appendChild(o);
+        const o = document.createElement("option"); o.value = o.textContent = opt;
+        if (opt === f.value) o.selected = true; el.appendChild(o);
       });
     } else {
       el = document.createElement("input");
-      el.type = f.type || "text";
-      el.value = f.value ?? "";
+      el.type = f.type || "text"; el.value = f.value ?? "";
       if (f.placeholder) el.placeholder = f.placeholder;
-      if (f.inputmode) el.inputMode = f.inputmode;
+      if (f.inputmode)   el.inputMode   = f.inputmode;
     }
-    el.id = f.id;
-    wrap.appendChild(el);
-    nodes.push(wrap);
-    values[f.id] = el;
+    el.id = f.id; wrap.appendChild(el); els[f.id] = el; return wrap;
   });
-
-  openModal({
-    title,
-    bodyNodes: nodes,
-    onOk: () => {
-      const out = {};
-      fields.forEach(f => out[f.id] = values[f.id].value);
-      onOk && onOk(out);
-    },
-    onCancel: () => { onCancel && onCancel(); }
+  openModal({ title, bodyNodes: nodeArr,
+    onOk: () => { const out = {}; fields.forEach(f => out[f.id] = els[f.id].value); onOk && onOk(out); },
+    onCancel: () => onCancel && onCancel()
   });
 }
 
 function showConfirm(title, message, onYes, onNo) {
   const p = document.createElement("div");
-  p.textContent = message;
-  p.style.fontSize = "16px";
-  p.style.lineHeight = "1.4";
-  openModal({
-    title,
-    bodyNodes:[p],
-    okText:"OK",
-    cancelText:"キャンセル",
-    onOk: () => { onYes && onYes(); },
-    onCancel: () => { onNo && onNo(); }
-  });
+  p.textContent = message; p.style.cssText = "font-size:16px;line-height:1.4;";
+  openModal({ title, bodyNodes:[p], okText:"OK", cancelText:"キャンセル",
+    onOk: () => onYes && onYes(), onCancel: () => onNo && onNo() });
 }
-
 function showAlert(title, message, onClose) {
   const p = document.createElement("div");
-  p.textContent = message;
-  p.style.fontSize = "16px";
-  p.style.lineHeight = "1.4";
-  openModal({
-    title,
-    bodyNodes:[p],
-    okText:"閉じる",
-    hideCancel:true,
-    onOk: () => { onClose && onClose(); },
-    onCancel: () => { onClose && onClose(); }
-  });
+  p.textContent = message; p.style.cssText = "font-size:16px;line-height:1.4;";
+  openModal({ title, bodyNodes:[p], okText:"閉じる", hideCancel:true,
+    onOk: () => onClose && onClose(), onCancel: () => onClose && onClose() });
+}
+function showDeleteConfirm(message, onYes, onNo) {
+  const p = document.createElement("div");
+  p.textContent = message; p.style.cssText = "font-size:16px;line-height:1.4;";
+  openModal({ title:"確認", bodyNodes:[p], okText:"削除OK", cancelText:"キャンセル",
+    onOk: () => onYes && onYes(), onCancel: () => onNo && onNo() });
 }
 
+/* ── ユーティリティ ── */
 function todayISO() {
   const d = new Date();
-  const yyyy = d.getFullYear();
-  const mm = String(d.getMonth() + 1).padStart(2, "0");
-  const dd = String(d.getDate()).padStart(2, "0");
-  return `${yyyy}-${mm}-${dd}`;
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
 }
-
-function loadJSON(key, fallback) {
-  try {
-    const raw = localStorage.getItem(key);
-    if (!raw) return fallback;
-    return JSON.parse(raw);
-  } catch {
-    return fallback;
-  }
+function loadJSON(key, fb) { try { const r = localStorage.getItem(key); return r ? JSON.parse(r) : fb; } catch { return fb; } }
+function saveJSON(key, val) { safeSet(key, JSON.stringify(val)); }
+function formatJP(iso) { if (!iso) return ""; const [y,m,d] = iso.split("-"); return `${y}/${m}/${d}`; }
+function escapeHtml(s) {
+  return String(s ?? "").replaceAll("&","&amp;").replaceAll("<","&lt;")
+    .replaceAll(">","&gt;").replaceAll('"',"&quot;").replaceAll("'","&#039;");
 }
-
-function saveJSON(key, value) {
-  localStorage.setItem(key, JSON.stringify(value));
+function clampColor(hex, fb) {
+  return (typeof hex === "string" && /^#[0-9a-fA-F]{6}$/.test(hex.trim())) ? hex.trim() : fb;
 }
-
-function formatJP(iso) {
-  if (!iso) return "";
-  const [y, m, d] = iso.split("-");
-  return `${y}/${m}/${d}`;
-}
-
-function escapeHtml(str) {
-  return String(str ?? "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
-}
-
-/* v5 UI patches
-  ・履歴を 区分ごとの3レーンへ分割し レーン単位で横スクロール
-  ・作業内容の縦積み禁止 折り返し禁止
-  ・作業内容マスターと区分マスターを折りたたみ
-  ・画面下部の固定 入力/履歴 ボタンを非表示
-*/
-
-function ensureDynamicStylesV5() {
-  if (document.getElementById("dynamicStyles_v5")) return;
-  const css = `
-    .pill{
-      display:inline-flex;
-      align-items:center;
-      white-space:nowrap;
-      word-break:keep-all;
-      overflow-wrap:normal;
-      padding:5px 10px;
-      border-radius:999px;
-      line-height:1.1;
-    }
-
-    /* lane layout */
-    .laneBlock{ margin: 10px 0 18px; }
-    .laneTitle{
-      display:block;
-      font-size:12px;
-      opacity:0.72;
-      margin:0 0 8px 6px;
-      white-space:nowrap;
-    }
-    .laneScroll{
-      position:relative;
-      display:flex;
-      flex-wrap:nowrap;
-      gap:12px;
-      overflow-x:auto;
-      -webkit-overflow-scrolling:touch;
-      padding:6px 6px;
-      scrollbar-width:thin;
-      scroll-snap-type:x proximity;
-    }
-    .laneScroll::after{
-      content:"";
-      position:sticky;
-      right:0;
-      width:22px;
-      height:100%;
-      margin-left:auto;
-      pointer-events:none;
-      background:linear-gradient(to left, rgba(11,11,11,0.85), rgba(11,11,11,0));
-    }
-
-    .histCard{
-      flex: 0 0 auto;
-      min-width: 220px;
-      max-width: 86vw;
-      border: 1px solid rgba(255,255,255,0.10);
-      background: rgba(255,255,255,0.03);
-      border-radius: 18px;
-      padding: 12px;
-      scroll-snap-align:start;
-    }
-    .histMeta{
-      display:flex;
-      gap:10px;
-      align-items:baseline;
-      justify-content:space-between;
-      margin-bottom:10px;
-      white-space:nowrap;
-    }
-    .histMeta .date{ font-size:16px; }
-    .histMeta .nights{ opacity:0.8; font-size:14px; }
-    .histPills{
-      display:flex;
-      flex-wrap:nowrap;
-      gap:8px;
-      white-space:nowrap;
-      overflow:hidden;
-    }
-    .histActions{
-      display:flex;
-      justify-content:flex-end;
-      margin-top:10px;
-    }
-
-    /* collapsibles */
-    .miniPanel{
-      border:1px solid rgba(255,255,255,0.12);
-      border-radius:18px;
-      padding:12px;
-      margin:10px 0;
-      background:rgba(255,255,255,0.03);
-    }
-    .catPanel{
-      border:none;
-      background:transparent;
-      padding:0;
-    }
-    .catPanel .miniToggle{ margin:0; }
-    .catPanel #catList_v5{ margin-top:8px; }
-    .miniToggle{
-      width:100%;
-      text-align:left;
-      margin:10px 0;
-    }
-    .miniRow{
-      display:flex;
-      gap:10px;
-      align-items:center;
-      flex-wrap:wrap;
-    }
-    .miniRow input[type=text]{ flex:1 1 180px; }
-
-    /* hide bottom fixed nav if an old layout still exists */
-    #bottomNav, #bottomBar, #bottomButtons, .bottomNav, .bottomBar, .bottomButtons, .bottom-tabs, .bottomTabs, .fixedBottom, .stickyBottom{
-      display:none !important;
-    }
-  `;
-  const st = document.createElement("style");
-  st.id = "dynamicStyles_v5";
-  st.textContent = css;
-  document.head.appendChild(st);
-}
-
-function showDeleteConfirmV5(message, onYes, onNo) {
-  const p = document.createElement("div");
-  p.textContent = message;
-  p.style.fontSize = "16px";
-  p.style.lineHeight = "1.4";
-  openModal({
-    title: "確認",
-    bodyNodes: [p],
-    okText: "削除OK",
-    cancelText: "キャンセル",
-    onOk: () => { onYes && onYes(); },
-    onCancel: () => { onNo && onNo(); }
-  });
-}
-
-function setupMasterCollapsiblesV5() {
-  // 作業内容マスター折りたたみ
-  const master = document.getElementById("master");
-  if (master && !document.getElementById("masterWrap_v5")) {
-    const wrap = document.createElement("div");
-    wrap.id = "masterWrap_v5";
-    wrap.style.display = "none";
-
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.id = "masterToggleBtn_v5";
-    btn.className = "miniToggle";
-    btn.textContent = "作業内容マスター 表示";
-
-    master.parentNode.insertBefore(btn, master);
-    master.parentNode.insertBefore(wrap, master);
-    wrap.appendChild(master);
-
-    btn.addEventListener("click", () => {
-      const open = wrap.style.display !== "none";
-      wrap.style.display = open ? "none" : "";
-      btn.textContent = open ? "作業内容マスター 表示" : "作業内容マスター 非表示";
-    });
-  }
-
-  // 区分マスター
-  const inputView = document.getElementById("viewInput") || document.body;
-  if (!document.getElementById("catMasterPanel_v5")) {
-    const panel = document.createElement("div");
-    panel.id = "catMasterPanel_v5";
-    panel.className = "miniPanel catPanel";
-
-    const toggle = document.createElement("button");
-    toggle.type = "button";
-    toggle.className = "miniToggle";
-    toggle.textContent = "区分マスター 表示";
-
-    const body = document.createElement("div");
-    body.style.display = "none";
-
-    const row = document.createElement("div");
-    row.className = "miniRow";
-
-    const inp = document.createElement("input");
-    inp.type = "text";
-    inp.placeholder = "区分名を追加";
-    inp.id = "catName_v5";
-
-    const add = document.createElement("button");
-    add.type = "button";
-    add.textContent = "追加";
-
-    row.appendChild(inp);
-    row.appendChild(add);
-
-    const list = document.createElement("div");
-    list.id = "catList_v5";
-    list.style.marginTop = "10px";
-
-    const rerenderAll = () => {
-      renderTaskChips();
-      renderMaster();
-      renderReco();
-      renderHistory();
-    };
-
-    const render = () => {
-      const cats = getCats();
-      list.innerHTML = "";
-      cats.forEach((c, idx) => {
-        const r = document.createElement("div");
-        r.className = "miniRow";
-        r.style.margin = "6px 0";
-
-        const pill = document.createElement("span");
-        pill.className = "pill";
-        pill.textContent = c;
-
-        const up = document.createElement("button");
-        up.type = "button";
-        up.className = "small";
-        up.textContent = "上へ";
-        up.disabled = idx === 0;
-
-        const down = document.createElement("button");
-        down.type = "button";
-        down.className = "small";
-        down.textContent = "下へ";
-        down.disabled = idx === cats.length - 1;
-
-        const del = document.createElement("button");
-        del.type = "button";
-        del.className = "small danger";
-        del.textContent = "削除";
-        // 削除は 最低1件残る範囲で許可
-        up.addEventListener("click", () => {
-          const arr = getCats();
-          if (idx <= 0 || idx >= arr.length) return;
-          const tmp = arr[idx - 1];
-          arr[idx - 1] = arr[idx];
-          arr[idx] = tmp;
-          saveCats(arr);
-          render();
-          rerenderAll();
-        });
-
-        down.addEventListener("click", () => {
-          const arr = getCats();
-          if (idx < 0 || idx >= arr.length - 1) return;
-          const tmp = arr[idx + 1];
-          arr[idx + 1] = arr[idx];
-          arr[idx] = tmp;
-          saveCats(arr);
-          render();
-          rerenderAll();
-        });
-
-        del.addEventListener("click", () => {
-          const name = c;
-          const catsNow = getCats();
-          if (catsNow.length <= 1) {
-            showAlert("確認", "区分は最低1つ必要");
-            return;
-          }
-          showDeleteConfirmV5("区分を削除", () => {
-            const next = catsNow.filter(x => x !== name);
-            saveCats(next);
-
-            // 既存タスクの区分を退避
-            const ts = loadTasks();
-            const fallback = next[0] ? String(next[0]) : "その他";
-            ts.forEach(t => {
-              if (String(t.cat ?? "") === name) t.cat = fallback;
-            });
-            saveTasks(ts);
-
-            render();
-            rerenderAll();
-          }, () => {});
-        });
-
-
-        r.appendChild(pill);
-        r.appendChild(up);
-        r.appendChild(down);
-        r.appendChild(del);
-        list.appendChild(r);
-      });
-    };
-
-    add.addEventListener("click", () => {
-      const name = String(inp.value ?? "").trim();
-      if (!name) return;
-      const cats = getCats();
-      if (cats.includes(name)) {
-        showAlert("確認", "同名が既に存在");
-        return;
-      }
-      cats.push(name);
-      saveCats(cats);
-      inp.value = "";
-      render();
-      rerenderAll();
-    });
-
-    toggle.addEventListener("click", () => {
-      const open = body.style.display !== "none";
-      body.style.display = open ? "none" : "";
-      toggle.textContent = open ? "区分マスター 表示" : "区分マスター 非表示";
-    });
-
-    body.appendChild(row);
-    body.appendChild(list);
-    panel.appendChild(toggle);
-    panel.appendChild(body);
-
-    // 作業内容マスターの下に入れる
-    const masterWrap = document.getElementById("masterWrap_v5");
-    const masterToggleBtn = document.getElementById("masterToggleBtn_v5");
-    if (masterWrap && masterWrap.parentNode) {
-      masterWrap.parentNode.insertBefore(panel, masterWrap.nextSibling);
-    } else if (master && master.parentNode) {
-      master.parentNode.insertBefore(panel, master.nextSibling);
-    } else {
-      inputView.appendChild(panel);
-    }
-
-    render();
-  }
-}
-
-
-function clampColor(hex, fallback) {
-  if (typeof hex !== "string") return fallback;
-  const v = hex.trim();
-  if (/^#[0-9a-fA-F]{6}$/.test(v)) return v;
-  return fallback;
-}
-
 function normalizeIntOrNull(raw) {
-  if (raw === "" || raw === null || raw === undefined) return null;
-  const n = Number(raw);
-  if (!Number.isFinite(n)) return null;
-  const i = Math.trunc(n);
-  if (i < 0) return null;
-  return i;
+  if (raw === "" || raw == null) return null;
+  const n = Number(raw); if (!Number.isFinite(n)) return null;
+  const i = Math.trunc(n); return i < 0 ? null : i;
+}
+function daysBetween(a, b) {
+  const ms = new Date(`${b}T00:00:00`) - new Date(`${a}T00:00:00`);
+  return Number.isFinite(ms) ? Math.floor(ms/86400000) : null;
+}
+function genId() {
+  return (typeof crypto !== "undefined" && crypto.randomUUID) ? crypto.randomUUID()
+    : `${Date.now()}_${Math.random().toString(16).slice(2)}`;
 }
 
-function daysBetween(isoA, isoB) {
-  // isoA <= isoB を想定
-  const a = new Date(`${isoA}T00:00:00`);
-  const b = new Date(`${isoB}T00:00:00`);
-  const ms = b.getTime() - a.getTime();
-  if (!Number.isFinite(ms)) return null;
-  return Math.floor(ms / 86400000);
-}
+/* ── rows ── */
+function loadRows() { const r = loadJSON(STORAGE_KEY,[]); return Array.isArray(r) ? r : []; }
+function saveRows(rows) { saveJSON(STORAGE_KEY, rows); }
 
-/* rows 互換
-  既存: { id, date, nights, tasks:[string], other }
-*/
-function loadRows() {
-  const rows = loadJSON(STORAGE_KEY, []);
-  if (!Array.isArray(rows)) return [];
-  return rows;
-}
-
-function saveRows(rows) {
-  saveJSON(STORAGE_KEY, rows);
-}
-
-/* tasks master 互換
-  v2: [ "トイレ", "風呂", ... ]
-  v3: [ { name, cat, freqDays, bg, text }, ... ]
-*/
+/* ── tasks ── */
 function migrateTasks(raw) {
   if (!raw) return null;
-
   if (Array.isArray(raw) && raw.every(x => typeof x === "string")) {
-    // 区分推測は禁止なので 一律 その他 を既定値として移行
-    return raw
-      .map(s => String(s).trim())
-      .filter(s => s.length > 0)
-      .map(s => ({
-        name: s,
-        cat: "その他",
-        freqDays: null,
-        bg: "#0f0f0f",
-        text: "#f0f0f0"
-      }));
+    return raw.map(s => String(s).trim()).filter(s => s)
+      .map(s => ({ name:s, cat:"その他", freqDays:null, bg:"#0f0f0f", text:"#f0f0f0" }));
   }
-
   if (Array.isArray(raw) && raw.every(x => x && typeof x === "object" && typeof x.name === "string")) {
     return raw.map(x => ({
       name: String(x.name).trim(),
-      cat: getCats().includes(x.cat) ? x.cat : "その他",
+      cat:  getCats().includes(x.cat) ? x.cat : "その他",
       freqDays: normalizeIntOrNull(x.freqDays),
-      bg: clampColor(x.bg, "#0f0f0f"),
+      bg:   clampColor(x.bg,   "#0f0f0f"),
       text: clampColor(x.text, "#f0f0f0")
     })).filter(x => x.name.length > 0);
   }
-
   return null;
 }
-
 function ensureDefaultTasks() {
-  const raw = loadJSON(TASKS_KEY, null);
-  const migrated = migrateTasks(raw);
-
-  if (migrated && migrated.length > 0) {
-    // unique by name keep first
-    const seen = new Set();
-    const uniq = [];
-    migrated.forEach(t => {
-      if (seen.has(t.name)) return;
-      seen.add(t.name);
-      uniq.push(t);
-    });
-    saveJSON(TASKS_KEY, uniq);
-    return uniq;
+  const m = migrateTasks(loadJSON(TASKS_KEY, null));
+  if (m && m.length) {
+    const seen = new Set(), uniq = [];
+    m.forEach(t => { if (!seen.has(t.name)) { seen.add(t.name); uniq.push(t); } });
+    saveJSON(TASKS_KEY, uniq); return uniq;
   }
-
-  const base = defaultTaskNames.map(s => ({
-    name: s,
-    cat: "その他",
-    freqDays: null,
-    bg: "#0f0f0f",
-    text: "#f0f0f0"
-  }));
-  saveJSON(TASKS_KEY, base);
-  return base;
+  const base = defaultTaskNames.map(s => ({ name:s, cat:"その他", freqDays:null, bg:"#0f0f0f", text:"#f0f0f0" }));
+  saveJSON(TASKS_KEY, base); return base;
 }
-
 function loadTasks() {
-  const raw = loadJSON(TASKS_KEY, null);
-  const migrated = migrateTasks(raw);
-  if (migrated && migrated.length > 0) return migrated;
-  return ensureDefaultTasks();
+  const m = migrateTasks(loadJSON(TASKS_KEY, null));
+  return (m && m.length) ? m : ensureDefaultTasks();
 }
-
 function saveTasks(tasks) {
-  const cleaned = (tasks || [])
-    .filter(x => x && typeof x === "object")
-    .map(x => ({
-      name: String(x.name ?? "").trim(),
-      cat: getCats().includes(x.cat) ? x.cat : "その他",
-      freqDays: normalizeIntOrNull(x.freqDays),
-      bg: clampColor(x.bg, "#0f0f0f"),
-      text: clampColor(x.text, "#f0f0f0")
-    }))
-    .filter(x => x.name.length > 0);
-
-  // unique by name keep first
-  const seen = new Set();
-  const uniq = [];
-  cleaned.forEach(t => {
-    if (seen.has(t.name)) return;
-    seen.add(t.name);
-    uniq.push(t);
-  });
-
-  saveJSON(TASKS_KEY, uniq);
-  return uniq;
+  const seen = new Set(), uniq = [];
+  (tasks || []).filter(x => x && typeof x === "object")
+    .map(x => ({ name:String(x.name??"").trim(), cat:getCats().includes(x.cat)?x.cat:"その他",
+      freqDays:normalizeIntOrNull(x.freqDays), bg:clampColor(x.bg,"#0f0f0f"), text:clampColor(x.text,"#f0f0f0") }))
+    .filter(x => x.name.length)
+    .forEach(t => { if (!seen.has(t.name)) { seen.add(t.name); uniq.push(t); } });
+  saveJSON(TASKS_KEY, uniq); return uniq;
 }
 
-/* app name */
-function loadAppName() {
-  const v = localStorage.getItem(APPNAME_KEY);
-  const s = String(v ?? "").trim();
-  return s.length > 0 ? s : "メンテログ";
-}
-function saveAppName(v) {
-  const s = String(v ?? "").trim();
-  if (s.length === 0) {
-    localStorage.removeItem(APPNAME_KEY);
-    return "メンテログ";
-  }
-  localStorage.setItem(APPNAME_KEY, s);
-  return s;
-}
-function applyAppName() {
-  const name = loadAppName();
-  $("appTitle").textContent = name;
-  document.title = name;
-  $("appName").value = name;
-}
+/* ── アプリ名 ── */
+function loadAppName() { const s = String(localStorage.getItem(APPNAME_KEY)??"").trim(); return s||"メンテログ"; }
+function saveAppName(v) { const s = String(v??"").trim(); if (!s) { localStorage.removeItem(APPNAME_KEY); return "メンテログ"; } localStorage.setItem(APPNAME_KEY,s); return s; }
+function applyAppName() { const n = loadAppName(); $("appTitle").textContent = n; document.title = n; $("appName").value = n; }
+function renderStatus() { $("status").textContent = `記録 ${loadRows().length}件`; }
 
-function renderStatus() {
-  const rows = loadRows();
-  $("status").textContent = `記録 ${rows.length}件`;
-}
-
-/* tasks selection */
+/* ── tasksByCat（動的・ハードコードなし） ── */
 function tasksByCat(tasks) {
-  const map = { "掃除": [], "洗濯": [], "その他": [] };
+  const cats = getCats(), map = {};
+  cats.forEach(c => map[c] = []);
   tasks.forEach(t => {
-    const cat = getCats().includes(t.cat) ? t.cat : "その他";
-    map[cat].push(t);
+    const c = cats.includes(t.cat) ? t.cat : (cats[0]||"その他");
+    if (!map[c]) map[c] = []; map[c].push(t);
   });
   return map;
 }
 
+/* ── 入力チェックボックス ── */
 function renderTaskChips() {
-  const tasks = loadTasks();
-  const byCat = tasksByCat(tasks);
-  const area = $("tasksArea");
+  const tasks = loadTasks(), byCat = tasksByCat(tasks), area = $("tasksArea");
   area.innerHTML = "";
-
   getCats().forEach(cat => {
-    const items = byCat[cat] || [];
-    const title = document.createElement("div");
-    title.className = "groupTitle";
-    title.textContent = cat;
+    const items = byCat[cat]||[];
+    const title = document.createElement("div"); title.className = "groupTitle"; title.textContent = cat;
     area.appendChild(title);
-
-    const wrap = document.createElement("div");
-    wrap.className = "chips";
-
-    if (items.length === 0) {
-      const empty = document.createElement("div");
-      empty.className = "muted";
-      empty.textContent = "未設定";
-      wrap.appendChild(empty);
+    const wrap = document.createElement("div"); wrap.className = "chips";
+    if (!items.length) {
+      const em = document.createElement("div"); em.className = "muted"; em.textContent = "未設定"; wrap.appendChild(em);
     } else {
       items.forEach(t => {
-        const label = document.createElement("label");
-        label.className = "chip";
-        label.setAttribute("data-color", "1");
-        label.style.background = t.bg || "#0f0f0f";
-        label.style.color = t.text || "#f0f0f0";
-        label.style.borderColor = "rgba(255,255,255,0.18)";
-        label.innerHTML = `
-          <input type="checkbox" value="${escapeHtml(t.name)}" />
-          <span>${escapeHtml(t.name)}</span>
-        `;
-        wrap.appendChild(label);
+        const lbl = document.createElement("label"); lbl.className = "chip";
+        lbl.style.background = t.bg||"#0f0f0f"; lbl.style.color = t.text||"#f0f0f0";
+        lbl.style.borderColor = "rgba(255,255,255,0.18)";
+        lbl.innerHTML = `<input type="checkbox" value="${escapeHtml(t.name)}"><span>${escapeHtml(t.name)}</span>`;
+        wrap.appendChild(lbl);
       });
     }
-
     area.appendChild(wrap);
   });
 }
-
 function getSelectedTasks() {
-  const area = $("tasksArea");
-  const checks = Array.from(area.querySelectorAll("input[type=checkbox]"));
-  return checks.filter(c => c.checked).map(c => c.value);
+  return Array.from($("tasksArea").querySelectorAll("input[type=checkbox]")).filter(c=>c.checked).map(c=>c.value);
 }
-
 function clearInput() {
-  $("date").value = todayISO();
-  $("nights").value = "";
-  $("other").value = "";
-  const area = $("tasksArea");
-  Array.from(area.querySelectorAll("input[type=checkbox]")).forEach(c => c.checked = false);
+  $("date").value = todayISO(); $("nights").value = ""; $("other").value = "";
+  Array.from($("tasksArea").querySelectorAll("input[type=checkbox]")).forEach(c=>c.checked=false);
 }
 
-/* rows add delete */
-function addRow(row) {
-  const rows = loadRows();
-  const id = `${Date.now()}_${Math.random().toString(16).slice(2)}`;
-  rows.push({ id, ...row });
-  saveRows(rows);
-  return id;
+/* ── rows CRUD ── */
+function addRow(row) { const rows = loadRows(); rows.push({ id:genId(), ...row }); saveRows(rows); }
+function deleteRow(id) { saveRows(loadRows().filter(r=>r.id!==id)); }
+function updateRow(id, patch) {
+  const rows = loadRows(), idx = rows.findIndex(r=>r.id===id);
+  if (idx===-1) return; rows[idx] = {...rows[idx],...patch}; saveRows(rows);
 }
-
-function deleteRow(id) {
-  const rows = loadRows();
-  const next = rows.filter(r => r.id !== id);
-  saveRows(next);
-}
-
-function rowSummaryParts(r) {
-  const tasks = Array.isArray(r.tasks) ? r.tasks : [];
-  const other = String(r.other ?? "").trim();
-  const parts = [];
-  tasks.forEach(t => parts.push(t));
-  if (other.length > 0) parts.push(other);
-  return parts;
-}
-
 function taskStyleByName(name) {
-  const tasks = loadTasks();
-  const hit = tasks.find(t => t.name === name);
-  if (!hit) return null;
-  return { bg: hit.bg || "#0f0f0f", text: hit.text || "#f0f0f0" };
+  const hit = loadTasks().find(t=>t.name===name);
+  return hit ? { bg:hit.bg||"#0f0f0f", text:hit.text||"#f0f0f0" } : null;
 }
 
+/* ── 履歴 編集モーダル ── */
+function openHistEditModal(rowId) {
+  const row = loadRows().find(r=>r.id===rowId);
+  if (!row) return;
+  const tasks = loadTasks(), cats = getCats();
+  const selSet = new Set(Array.isArray(row.tasks) ? row.tasks : []);
+  const wrap = document.createElement("div");
+
+  // 日付
+  const dw = document.createElement("div"); dw.style.marginBottom = "10px";
+  dw.innerHTML = `<label style="display:block;font-size:13px;opacity:0.75;margin-bottom:4px;">日付</label>`;
+  const dInp = document.createElement("input"); dInp.type="date"; dInp.value=row.date||""; dw.appendChild(dInp);
+  wrap.appendChild(dw);
+
+  // 泊数
+  const nw = document.createElement("div"); nw.style.marginBottom = "10px";
+  nw.innerHTML = `<label style="display:block;font-size:13px;opacity:0.75;margin-bottom:4px;">泊数</label>`;
+  const nInp = document.createElement("input"); nInp.type="number"; nInp.inputMode="numeric"; nInp.min="0";
+  nInp.value = (row.nights!=null) ? String(row.nights) : ""; nw.appendChild(nInp);
+  wrap.appendChild(nw);
+
+  // 作業チェックボックス
+  const tl = document.createElement("div"); tl.style.cssText="font-size:13px;opacity:0.75;margin-bottom:6px;";
+  tl.textContent="作業内容"; wrap.appendChild(tl);
+  const byCat = tasksByCat(tasks);
+  cats.forEach(cat => {
+    const items = byCat[cat]||[];
+    if (!items.length) return;
+    const cl = document.createElement("div"); cl.style.cssText="font-size:12px;opacity:0.6;margin:8px 0 4px;";
+    cl.textContent=cat; wrap.appendChild(cl);
+    const chips = document.createElement("div"); chips.className="chips";
+    items.forEach(t => {
+      const lbl = document.createElement("label"); lbl.className="chip";
+      lbl.style.background=t.bg||"#0f0f0f"; lbl.style.color=t.text||"#f0f0f0";
+      lbl.style.borderColor="rgba(255,255,255,0.18)";
+      const cb = document.createElement("input"); cb.type="checkbox"; cb.value=t.name; cb.checked=selSet.has(t.name);
+      lbl.appendChild(cb); const sp=document.createElement("span"); sp.textContent=t.name; lbl.appendChild(sp);
+      chips.appendChild(lbl);
+    });
+    wrap.appendChild(chips);
+  });
+
+  // メモ
+  const ow = document.createElement("div"); ow.style.marginTop="10px";
+  ow.innerHTML=`<label style="display:block;font-size:13px;opacity:0.75;margin-bottom:4px;">その他メモ</label>`;
+  const oTA = document.createElement("textarea"); oTA.value=row.other||""; oTA.style.minHeight="80px";
+  ow.appendChild(oTA); wrap.appendChild(ow);
+
+  openModal({ title:"記録を編集", bodyNodes:[wrap], okText:"保存",
+    onOk: () => {
+      if (!dInp.value) { showAlert("確認","日付は必須"); return; }
+      const newTasks = Array.from(wrap.querySelectorAll("input[type=checkbox]")).filter(c=>c.checked).map(c=>c.value);
+      updateRow(rowId, { date:dInp.value, nights:normalizeIntOrNull(nInp.value), tasks:newTasks, other:oTA.value });
+      renderStatus(); renderHistory(); renderReco();
+    }
+  });
+}
+
+/* ── 履歴描画 ── */
 let sortMode = "desc";
 
 function renderHistory() {
-  const rows = loadRows().slice();
-  rows.sort((a, b) => {
-    const ad = String(a.date ?? "");
-    const bd = String(b.date ?? "");
-    if (sortMode === "asc") return ad.localeCompare(bd);
-    return bd.localeCompare(ad);
+  const rows = loadRows().slice().sort((a,b)=>{
+    const ad=String(a.date??""), bd=String(b.date??"");
+    return sortMode==="asc" ? ad.localeCompare(bd) : bd.localeCompare(ad);
   });
-
   const body = $("historyBody");
   body.innerHTML = "";
+  if (!rows.length) { body.innerHTML=`<div class="muted">記録なし</div>`; return; }
 
-  if (rows.length === 0) {
-    body.innerHTML = `<div class="muted">記録なし</div>`;
-    return;
-  }
-
-  const cats = getCats();
-  const tasks = loadTasks();
-
-  const fallbackCat = () => {
-    if (cats.includes("その他")) return "その他";
-    return cats[0] ? String(cats[0]) : "その他";
-  };
-
-  function taskCatByName(name) {
-    const hit = tasks.find(t => t.name === name);
-    const c = hit ? String(hit.cat ?? "").trim() : "";
+  const cats = getCats(), tasks = loadTasks();
+  const fallbackCat = () => cats.includes("その他") ? "その他" : (cats[0]||"その他");
+  const taskCatByName = name => {
+    const hit = tasks.find(t=>t.name===name);
+    const c = hit ? String(hit.cat??"").trim() : "";
     return cats.includes(c) ? c : fallbackCat();
-  }
+  };
 
   const blocks = rows.map(r => {
     const taskNames = Array.isArray(r.tasks) ? r.tasks.slice() : [];
-    const byCat = {};
-    cats.forEach(c => byCat[c] = []);
-
-    taskNames.forEach(nm => {
-      const c = taskCatByName(nm);
-      if (!byCat[c]) byCat[c] = [];
-      byCat[c].push(nm);
-    });
-
-    const other = String(r.other ?? "").trim();
-    if (other.length > 0) {
-            const oc = fallbackCat();
-      if (!byCat[oc]) byCat[oc] = [];
-      byCat[oc].push(other);
-    }
+    const byCat = {}; cats.forEach(c=>byCat[c]=[]);
+    taskNames.forEach(nm=>{ const c=taskCatByName(nm); if(!byCat[c]) byCat[c]=[]; byCat[c].push(nm); });
+    const other = String(r.other??"").trim();
+    if (other) { const oc=fallbackCat(); if(!byCat[oc]) byCat[oc]=[]; byCat[oc].push(other); }
 
     const dateTxt = r.date ? formatJP(r.date) : "日付不明";
-    const daysTxt = (r.nights === 0 || r.nights) ? String(r.nights) : "";
-    const daysPart = daysTxt !== "" ? `${escapeHtml(daysTxt)}日` : "";
-
+    const daysPart = (r.nights===0||r.nights) ? `${escapeHtml(String(r.nights))}日` : "";
     const catRows = cats.map(cat => {
-      const items = byCat[cat] || [];
-      if (!items.length) return "";
+      const items = byCat[cat]||[]; if(!items.length) return "";
       const pills = items.map(name => {
-        const style = taskStyleByName(name);
-        if (style) {
-          return `<span class="pill" style="background:${escapeHtml(style.bg)};color:${escapeHtml(style.text)}">${escapeHtml(name)}</span>`;
-        }
-        return `<span class="pill">${escapeHtml(name)}</span>`;
+        const st = taskStyleByName(name);
+        return st ? `<span class="pill" style="background:${escapeHtml(st.bg)};color:${escapeHtml(st.text)}">${escapeHtml(name)}</span>`
+                  : `<span class="pill">${escapeHtml(name)}</span>`;
       }).join("");
-      return `
-        <div class="histCatRow">
-          <div class="histCatLabel">${escapeHtml(cat)}</div>
-          <div class="histCatPills">${pills}</div>
-        </div>
-      `;
+      return `<div class="histCatRow"><div class="histCatLabel">${escapeHtml(cat)}</div><div class="histCatPills">${pills}</div></div>`;
     }).filter(Boolean).join("");
 
-    return `
-      <div class="histEntry">
-        <div class="histHeader">
-          <div class="histHeadLeft">
-            <div class="histDate">${escapeHtml(dateTxt)}</div>
-            <div class="histDays">${daysPart}</div>
-          </div>
-          <button type="button" class="histDelBtn" data-del="${escapeHtml(r.id)}">削除</button>
+    return `<div class="histEntry">
+      <div class="histHeader">
+        <div class="histHeadLeft">
+          <div class="histDate">${escapeHtml(dateTxt)}</div>
+          <div class="histDays">${daysPart}</div>
         </div>
-        <div class="histScroll"><div class="histInner">${catRows}</div></div>
+        <div class="histBtnWrap">
+          <button type="button" class="histEditBtn" data-edit="${escapeHtml(r.id)}">編集</button>
+          <button type="button" class="histDelBtn"  data-del="${escapeHtml(r.id)}">削除</button>
+        </div>
       </div>
-    `;
+      <div class="histScroll"><div class="histInner">${catRows}</div></div>
+    </div>`;
   }).join("");
 
   body.innerHTML = `<div class="histList">${blocks}</div>`;
 
-  Array.from(body.querySelectorAll("button[data-del]")).forEach(btn => {
+  body.querySelectorAll("button[data-edit]").forEach(btn =>
+    btn.addEventListener("click", () => openHistEditModal(btn.getAttribute("data-edit"))));
+  body.querySelectorAll("button[data-del]").forEach(btn =>
     btn.addEventListener("click", () => {
-      const id = btn.getAttribute("data-del");
-      if (!id) return;
-      showDeleteConfirmV5("この行を削除", () => {
-        deleteRow(id);
-        renderStatus();
-        renderHistory();
-        renderReco();
-      }, () => {});
-    });
-  });
+      const id = btn.getAttribute("data-del"); if(!id) return;
+      showDeleteConfirm("この記録を削除しますか？", () => { deleteRow(id); renderStatus(); renderHistory(); renderReco(); }, ()=>{});
+    }));
 }
 
-/* master UI */
+/* ── 作業内容マスター（ドラッグ＆ドロップ並び替え） ── */
 function renderMaster() {
   syncNewCatSelect();
-  const tasks = loadTasks();
-  const box = $("master");
+  const tasks = loadTasks(), box = $("master");
   box.innerHTML = "";
+  if (!tasks.length) { box.innerHTML=`<div class="muted">未設定</div>`; return; }
 
-  if (tasks.length === 0) {
-    box.innerHTML = `<div class="muted">未設定</div>`;
-    return;
-  }
+  let dragSrcIdx = null;
 
   tasks.forEach((t, idx) => {
     const div = document.createElement("div");
-    div.className = "masterItem";
+    div.className = "masterItem"; div.draggable = true; div.dataset.idx = idx;
 
-    const freqTxt = (t.freqDays && t.freqDays > 0) ? `${t.freqDays}日` : "未設定";
+    /* ドラッグハンドル */
+    const handle = document.createElement("span");
+    handle.className = "drag-handle"; handle.textContent = "⠿"; handle.title = "ドラッグして並び替え";
 
-    div.innerHTML = `
-      <div class="masterName">${escapeHtml(t.name)}</div>
-      <span class="tag">${escapeHtml(t.cat)}</span>
-      <span class="tag">頻度 ${escapeHtml(freqTxt)}</span>
-      <div class="colorPick">
-        <input data-bg="${idx}" type="color" value="${escapeHtml(clampColor(t.bg, "#0f0f0f"))}" />
-        <input data-text="${idx}" type="color" value="${escapeHtml(clampColor(t.text, "#f0f0f0"))}" />
-      </div>
+    /* 名前 */
+    const nameWrap = document.createElement("div");
+    nameWrap.style.cssText = "display:flex;align-items:center;gap:6px;";
+    const nameEl = document.createElement("div"); nameEl.className = "masterName"; nameEl.textContent = t.name;
+    nameWrap.appendChild(handle); nameWrap.appendChild(nameEl);
 
-      <button class="small" data-up="${idx}" type="button">上へ</button>
-      <button class="small" data-down="${idx}" type="button">下へ</button>
-      <button class="small" data-edit="${idx}" type="button">編集</button>
-      <button class="small danger" data-del-task="${idx}" type="button">削除</button>
-    `;
+    /* タグ */
+    const catTag = document.createElement("span"); catTag.className="tag"; catTag.textContent=t.cat;
+    const freqTag = document.createElement("span"); freqTag.className="tag";
+    freqTag.textContent = `頻度 ${(t.freqDays&&t.freqDays>0)?t.freqDays+"日":"未設定"}`;
+
+    /* カラーピッカー＋プレビュー */
+    const cpWrap = document.createElement("div"); cpWrap.className="colorPick";
+
+    const bgLab = document.createElement("span"); bgLab.className="color-label"; bgLab.textContent="背景";
+    const bgInp = document.createElement("input"); bgInp.type="color"; bgInp.value=clampColor(t.bg,"#0f0f0f"); bgInp.title="背景色";
+
+    const txLab = document.createElement("span"); txLab.className="color-label"; txLab.textContent="文字";
+    const txInp = document.createElement("input"); txInp.type="color"; txInp.value=clampColor(t.text,"#f0f0f0"); txInp.title="文字色";
+
+    const preview = document.createElement("span"); preview.className="colorPreview";
+    preview.textContent = t.name;
+    preview.style.background = t.bg||"#0f0f0f";
+    preview.style.color      = t.text||"#f0f0f0";
+
+    cpWrap.appendChild(bgLab); cpWrap.appendChild(bgInp);
+    cpWrap.appendChild(txLab); cpWrap.appendChild(txInp);
+    cpWrap.appendChild(preview);
+
+    /* 操作ボタン */
+    const editBtn = document.createElement("button"); editBtn.type="button"; editBtn.className="small"; editBtn.textContent="編集";
+    const delBtn  = document.createElement("button"); delBtn.type="button";  delBtn.className="small danger"; delBtn.textContent="削除";
+
+    div.appendChild(nameWrap); div.appendChild(catTag); div.appendChild(freqTag);
+    div.appendChild(cpWrap); div.appendChild(editBtn); div.appendChild(delBtn);
     box.appendChild(div);
-  });
 
-  // delete
-  Array.from(box.querySelectorAll("button[data-del-task]")).forEach(btn => {
-    btn.addEventListener("click", () => {
-      const i = Number(btn.getAttribute("data-del-task"));
-      if (!Number.isFinite(i)) return;
-      const tasks2 = loadTasks();
-      const target = tasks2[i];
-      if (!target) return;
-      showDeleteConfirmV5("選択肢を削除", () => { tasks2.splice(i,1); saveTasks(tasks2); renderTaskChips(); renderMaster(); renderReco(); }, () => {}); return;
+    /* ── ドラッグイベント（PC） ── */
+    div.addEventListener("dragstart", e => {
+      dragSrcIdx = idx; div.classList.add("dragging"); e.dataTransfer.effectAllowed="move";
     });
-  });
-
-  // move
-  Array.from(box.querySelectorAll("button[data-up]")).forEach(btn => {
-    btn.addEventListener("click", () => {
-      const i = Number(btn.getAttribute("data-up"));
-      if (!Number.isFinite(i) || i <= 0) return;
-      const tasks2 = loadTasks();
-      const tmp = tasks2[i - 1];
-      tasks2[i - 1] = tasks2[i];
-      tasks2[i] = tmp;
-      saveTasks(tasks2);
-      renderTaskChips();
-      renderMaster();
+    div.addEventListener("dragend", () => {
+      div.classList.remove("dragging");
+      box.querySelectorAll(".masterItem").forEach(el=>el.classList.remove("drag-over"));
     });
-  });
-  Array.from(box.querySelectorAll("button[data-down]")).forEach(btn => {
-    btn.addEventListener("click", () => {
-      const i = Number(btn.getAttribute("data-down"));
-      const tasks2 = loadTasks();
-      if (!Number.isFinite(i) || i >= tasks2.length - 1) return;
-      const tmp = tasks2[i + 1];
-      tasks2[i + 1] = tasks2[i];
-      tasks2[i] = tmp;
-      saveTasks(tasks2);
-      renderTaskChips();
-      renderMaster();
+    div.addEventListener("dragover", e => {
+      e.preventDefault(); e.dataTransfer.dropEffect="move";
+      box.querySelectorAll(".masterItem").forEach(el=>el.classList.remove("drag-over"));
+      div.classList.add("drag-over");
     });
-  });
-
-  // edit
-  Array.from(box.querySelectorAll("button[data-edit]")).forEach(btn => {
-    btn.addEventListener("click", () => {
-      const i = Number(btn.getAttribute("data-edit"));
-      if (!Number.isFinite(i)) return;
-      const tasks2 = loadTasks();
-      const t = tasks2[i];
-      if (!t) return;
-
-      showModal("項目を編集", [
-        {id:"name", label:"項目名", type:"text", value:t.name},
-        {id:"cat", label:"区分", type:"select", value:t.cat, options:getCats()},
-        {id:"freq", label:"推奨頻度 日数 空欄で未設定", type:"number", value:(t.freqDays && t.freqDays>0)?String(t.freqDays):"", inputmode:"numeric"}
-      ], (out) => {
-        const nm = String(out.name ?? "").trim();
-        if (nm.length === 0) return;
-        const catsNow = getCats();
-        const ct = catsNow.includes(String(out.cat).trim()) ? String(out.cat).trim() : "その他";
-        const fd = normalizeIntOrNull(String(out.freq ?? "").trim());
-        const freqDays = (fd && fd > 0) ? fd : null;
-
-        const exists = tasks2.find((x, idx) => idx !== i && x.name === nm);
-        if (exists) {
-          showAlert("確認", "同名が既に存在");
-          return;
-        }
-
-        tasks2[i] = { ...t, name: nm, cat: ct, freqDays };
-        saveTasks(tasks2);
-        renderTaskChips();
-        renderMaster();
-        renderReco();
-      }, () => {});
+    div.addEventListener("drop", e => {
+      e.preventDefault();
+      if (dragSrcIdx===null || dragSrcIdx===idx) return;
+      const ts = loadTasks(); const [moved]=ts.splice(dragSrcIdx,1); ts.splice(idx,0,moved);
+      saveTasks(ts); renderTaskChips(); renderMaster();
     });
-  });
 
-  // color change
-  Array.from(box.querySelectorAll("input[data-bg]")).forEach(inp => {
-    inp.addEventListener("input", () => {
-      const i = Number(inp.getAttribute("data-bg"));
-      const tasks2 = loadTasks();
-      if (!tasks2[i]) return;
-      tasks2[i].bg = clampColor(inp.value, "#0f0f0f");
-      saveTasks(tasks2);
-      renderTaskChips();
-      renderHistory();
-      renderReco();
+    /* ── タッチ並び替え（iPhone） ── */
+    let touchDragging = false;
+    handle.addEventListener("touchstart", e => {
+      touchDragging = true; div.classList.add("dragging"); e.stopPropagation();
+    }, {passive:true});
+    handle.addEventListener("touchmove", e => {
+      if (!touchDragging) return; e.preventDefault();
+      const y = e.touches[0].clientY;
+      box.querySelectorAll(".masterItem").forEach(el => el.classList.remove("drag-over"));
+      const target = Array.from(box.querySelectorAll(".masterItem")).find(el => {
+        const r = el.getBoundingClientRect(); return y>=r.top && y<=r.bottom;
+      });
+      if (target && target!==div) target.classList.add("drag-over");
+    }, {passive:false});
+    handle.addEventListener("touchend", e => {
+      if (!touchDragging) return; touchDragging=false; div.classList.remove("dragging");
+      const y = e.changedTouches[0].clientY;
+      box.querySelectorAll(".masterItem").forEach(el=>el.classList.remove("drag-over"));
+      const items = Array.from(box.querySelectorAll(".masterItem"));
+      const targetEl = items.find(el=>{ const r=el.getBoundingClientRect(); return y>=r.top&&y<=r.bottom; });
+      if (!targetEl||targetEl===div) return;
+      const toIdx = Number(targetEl.dataset.idx); if(isNaN(toIdx)||toIdx===idx) return;
+      const ts = loadTasks(); const [moved]=ts.splice(idx,1); ts.splice(toIdx,0,moved);
+      saveTasks(ts); renderTaskChips(); renderMaster();
     });
-  });
-  Array.from(box.querySelectorAll("input[data-text]")).forEach(inp => {
-    inp.addEventListener("input", () => {
-      const i = Number(inp.getAttribute("data-text"));
-      const tasks2 = loadTasks();
-      if (!tasks2[i]) return;
-      tasks2[i].text = clampColor(inp.value, "#f0f0f0");
-      saveTasks(tasks2);
-      renderTaskChips();
-      renderHistory();
-      renderReco();
+
+    /* ── カラーリアルタイムプレビュー ── */
+    bgInp.addEventListener("input", () => {
+      const ts=loadTasks(); if(!ts[idx]) return;
+      ts[idx].bg = clampColor(bgInp.value,"#0f0f0f");
+      saveTasks(ts); preview.style.background=ts[idx].bg;
+      renderTaskChips(); renderHistory(); renderReco();
+    });
+    txInp.addEventListener("input", () => {
+      const ts=loadTasks(); if(!ts[idx]) return;
+      ts[idx].text = clampColor(txInp.value,"#f0f0f0");
+      saveTasks(ts); preview.style.color=ts[idx].text;
+      renderTaskChips(); renderHistory(); renderReco();
+    });
+
+    /* ── 編集 ── */
+    editBtn.addEventListener("click", () => {
+      const ts=loadTasks(), tgt=ts[idx]; if(!tgt) return;
+      showModal("項目を編集",[
+        {id:"name",label:"項目名",type:"text",value:tgt.name},
+        {id:"cat",label:"区分",type:"select",value:tgt.cat,options:getCats()},
+        {id:"freq",label:"推奨頻度 日数（空欄=未設定）",type:"number",value:(tgt.freqDays&&tgt.freqDays>0)?String(tgt.freqDays):"",inputmode:"numeric"}
+      ], out => {
+        const nm=String(out.name??"").trim(); if(!nm) return;
+        const ct=getCats().includes(String(out.cat).trim())?String(out.cat).trim():"その他";
+        const fd=normalizeIntOrNull(String(out.freq??"").trim());
+        if (ts.find((x,i)=>i!==idx&&x.name===nm)) { showAlert("確認","同名が既に存在"); return; }
+        ts[idx]={...tgt,name:nm,cat:ct,freqDays:(fd&&fd>0)?fd:null};
+        saveTasks(ts); renderTaskChips(); renderMaster(); renderReco();
+      },()=>{});
+    });
+
+    /* ── 削除 ── */
+    delBtn.addEventListener("click", () => {
+      const ts=loadTasks(), tgt=ts[idx]; if(!tgt) return;
+      showDeleteConfirm(`「${tgt.name}」を削除しますか？`, ()=>{
+        ts.splice(idx,1); saveTasks(ts); renderTaskChips(); renderMaster(); renderReco();
+      },()=>{});
     });
   });
 }
 
+/* ── 作業追加フォーム ── */
 function addTaskFromInputs() {
-  const name = String($("newTask").value ?? "").trim();
-  if (name.length === 0) return;
-
-  const cat = String($("newCat") ? $("newCat").value : "" ?? "").trim();
-  const catsNow = getCats();
-  const ct = catsNow.includes(cat) ? cat : (catsNow[0] || "その他");
-
-  const freqRaw = $("newFreq").value;
-  const fd = normalizeIntOrNull(freqRaw);
-  const freqDays = (fd && fd > 0) ? fd : null;
-
-  const bg = clampColor($("newBg").value, "#0f0f0f");
-  const text = clampColor($("newText").value, "#f0f0f0");
-
+  const name = String($("newTask").value??"").trim(); if(!name) return;
+  const cats = getCats(), cat = String($("newCat")?$("newCat").value:"").trim();
+  const ct   = cats.includes(cat)?cat:(cats[0]||"その他");
+  const fd   = normalizeIntOrNull($("newFreq").value);
+  const bg   = clampColor($("newBg").value,"#0f0f0f");
+  const text = clampColor($("newText").value,"#f0f0f0");
   const tasks = loadTasks();
-  const exists = tasks.find(t => t.name === name);
-  if (exists) {
-    showAlert("確認", "同名が既に存在");
-    return;
-  }
-
-  tasks.push({ name, cat: ct, freqDays, bg, text });
+  if (tasks.find(t=>t.name===name)) { showAlert("確認","同名が既に存在"); return; }
+  tasks.push({name,cat:ct,freqDays:(fd&&fd>0)?fd:null,bg,text});
   saveTasks(tasks);
-
-  $("newTask").value = "";
-  $("newFreq").value = "";
-  $("newBg").value = "#0f0f0f";
-  $("newText").value = "#f0f0f0";
-
-  renderTaskChips();
-  renderMaster();
-  renderReco();
+  $("newTask").value=""; $("newFreq").value=""; $("newBg").value="#0f0f0f"; $("newText").value="#f0f0f0";
+  renderTaskChips(); renderMaster(); renderReco();
 }
 
-/* recommendation */
+/* ── 推奨作業 ── */
 function lastDoneMap(rows) {
-  const map = new Map(); // name -> iso date max
+  const map = new Map();
   rows.forEach(r => {
-    const iso = String(r.date ?? "");
-    if (!iso) return;
-    const tasks = Array.isArray(r.tasks) ? r.tasks : [];
-    tasks.forEach(name => {
-      const prev = map.get(name);
-      if (!prev || prev.localeCompare(iso) < 0) map.set(name, iso);
+    const iso = String(r.date??""); if(!iso) return;
+    (Array.isArray(r.tasks)?r.tasks:[]).forEach(name => {
+      const prev=map.get(name); if(!prev||prev.localeCompare(iso)<0) map.set(name,iso);
     });
   });
   return map;
 }
-
 function renderReco() {
-  const tasks = loadTasks();
-  const rows = loadRows();
-  const map = lastDoneMap(rows);
-  const today = todayISO();
-
-  const targets = tasks
-    .filter(t => t.freqDays && t.freqDays > 0)
-    .map(t => {
-      const last = map.get(t.name) || null;
-      let elapsed = null;
-      if (last) elapsed = daysBetween(last, today);
-      const due = (elapsed === null) ? true : (elapsed >= t.freqDays);
-      const over = (elapsed === null) ? (t.freqDays) : (elapsed - t.freqDays);
-      return { ...t, last, elapsed, due, over };
-    });
-
-  const box = $("reco");
-  if (targets.length === 0) {
-    box.textContent = "推奨頻度が設定された項目のみ表示";
-    return;
-  }
-
-  // sort: due first, then larger over
-  targets.sort((a, b) => {
-    const ad = a.due ? 1 : 0;
-    const bd = b.due ? 1 : 0;
-    if (ad !== bd) return bd - ad;
-    const ao = Number(a.over ?? 0);
-    const bo = Number(b.over ?? 0);
-    return bo - ao;
+  const tasks=loadTasks(), rows=loadRows(), map=lastDoneMap(rows), today=todayISO(), box=$("reco");
+  const targets = tasks.filter(t=>t.freqDays&&t.freqDays>0).map(t => {
+    const last=map.get(t.name)||null, elapsed=last?daysBetween(last,today):null;
+    const due=elapsed===null?true:elapsed>=t.freqDays;
+    const over=elapsed===null?t.freqDays:elapsed-t.freqDays;
+    return {...t,last,elapsed,due,over};
   });
-
+  if (!targets.length) { box.textContent="推奨頻度が設定された項目のみ表示"; return; }
+  targets.sort((a,b)=>{ const d=(b.due?1:0)-(a.due?1:0); return d!==0?d:Number(b.over??0)-Number(a.over??0); });
+  box.innerHTML = "";
   const wrap = document.createElement("div");
   targets.forEach(t => {
-    const item = document.createElement("div");
-    item.className = "recoItem";
-
-    const left = document.createElement("div");
-    left.className = "recoName";
-    left.textContent = t.name;
-    left.style.color = t.text || "#f0f0f0";
-
-    const meta = document.createElement("div");
-    meta.className = "recoMeta";
-
-    const lastTxt = t.last ? formatJP(t.last) : "未実施";
-    const elapsedTxt = (t.elapsed === null) ? "不明" : `${t.elapsed}日経過`;
-    const freqTxt = `${t.freqDays}日`;
-    const dueTxt = t.due ? "要実施" : "猶予";
-
-    meta.innerHTML = `
-      <div>${escapeHtml(dueTxt)}</div>
-      <div>${escapeHtml(lastTxt)}</div>
-      <div>${escapeHtml(elapsedTxt)} 閾値 ${escapeHtml(freqTxt)}</div>
-    `;
-
-    item.style.background = "transparent";
-    item.appendChild(left);
-    item.appendChild(meta);
-    wrap.appendChild(item);
+    const item = document.createElement("div"); item.className="recoItem";
+    const left = document.createElement("div"); left.className="recoName";
+    left.textContent=t.name; left.style.background=t.bg||"rgba(255,255,255,0.06)"; left.style.color=t.text||"#f0f0f0";
+    const meta = document.createElement("div"); meta.className="recoMeta";
+    const dueTxt = t.due?`<span class="due-label">要実施</span>`:"猶予";
+    meta.innerHTML=`<div>${dueTxt}</div><div>${escapeHtml(t.last?formatJP(t.last):"未実施")}</div>`
+      +`<div>${escapeHtml(t.elapsed===null?"不明":`${t.elapsed}日経過`)} 閾値${escapeHtml(String(t.freqDays))}日</div>`;
+    item.appendChild(left); item.appendChild(meta); wrap.appendChild(item);
   });
-
-  box.innerHTML = "";
   box.appendChild(wrap);
 }
 
-/* export import */
-function exportJSON() {
-  const payload = {
-    version: 3,
-    exportedAt: new Date().toISOString(),
-    appName: loadAppName(),
-    tasks: loadTasks(),
-    rows: loadRows()
-  };
-  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = `maintelog_backup_${todayISO()}.json`;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
+/* ── 区分マスター折りたたみ ── */
+function setupMasterCollapsibles() {
+  const master = $("master");
+  if (master && !$("masterWrap_v5")) {
+    const wrap = document.createElement("div"); wrap.id="masterWrap_v5"; wrap.style.display="none";
+    const btn = document.createElement("button"); btn.type="button"; btn.id="masterToggleBtn_v5";
+    btn.className="miniToggle"; btn.textContent="作業内容マスター 表示";
+    master.parentNode.insertBefore(btn, master); master.parentNode.insertBefore(wrap, master); wrap.appendChild(master);
+    btn.addEventListener("click",()=>{
+      const open=wrap.style.display!=="none"; wrap.style.display=open?"none":"";
+      btn.textContent=open?"作業内容マスター 表示":"作業内容マスター 非表示";
+    });
+  }
+  if (!$("catMasterPanel_v5")) {
+    const panel=document.createElement("div"); panel.id="catMasterPanel_v5"; panel.className="miniPanel catPanel";
+    const toggle=document.createElement("button"); toggle.type="button"; toggle.className="miniToggle"; toggle.textContent="区分マスター 表示";
+    const body=document.createElement("div"); body.style.display="none";
+    const row=document.createElement("div"); row.className="miniRow";
+    const inp=document.createElement("input"); inp.type="text"; inp.placeholder="区分名を追加"; inp.id="catName_v5";
+    const add=document.createElement("button"); add.type="button"; add.textContent="追加";
+    row.appendChild(inp); row.appendChild(add);
+    const list=document.createElement("div"); list.style.marginTop="10px";
+    const rerenderAll=()=>{ renderTaskChips();renderMaster();renderReco();renderHistory(); };
+    const renderCats=()=>{
+      const cats=getCats(); list.innerHTML="";
+      cats.forEach((c,idx)=>{
+        const r=document.createElement("div"); r.className="miniRow"; r.style.margin="6px 0";
+        const pill=document.createElement("span"); pill.className="pill"; pill.textContent=c;
+        const up=document.createElement("button"); up.type="button"; up.className="small"; up.textContent="上へ"; up.disabled=idx===0;
+        const dn=document.createElement("button"); dn.type="button"; dn.className="small"; dn.textContent="下へ"; dn.disabled=idx===cats.length-1;
+        const dl=document.createElement("button"); dl.type="button"; dl.className="small danger"; dl.textContent="削除";
+        up.addEventListener("click",()=>{ const a=getCats(); if(idx<=0)return; [a[idx-1],a[idx]]=[a[idx],a[idx-1]]; saveCats(a);renderCats();rerenderAll(); });
+        dn.addEventListener("click",()=>{ const a=getCats(); if(idx>=a.length-1)return; [a[idx+1],a[idx]]=[a[idx],a[idx+1]]; saveCats(a);renderCats();rerenderAll(); });
+        dl.addEventListener("click",()=>{
+          const cn=getCats(); if(cn.length<=1){showAlert("確認","区分は最低1つ必要");return;}
+          showDeleteConfirm("区分を削除",()=>{
+            const next=cn.filter(x=>x!==c); saveCats(next);
+            const ts=loadTasks(),fb=next[0]||"その他";
+            ts.forEach(t=>{ if(String(t.cat??"")===c) t.cat=fb; }); saveTasks(ts);
+            renderCats(); rerenderAll();
+          },()=>{});
+        });
+        r.appendChild(pill);r.appendChild(up);r.appendChild(dn);r.appendChild(dl); list.appendChild(r);
+      });
+    };
+    add.addEventListener("click",()=>{
+      const name=String(inp.value??"").trim(); if(!name)return;
+      const cats=getCats(); if(cats.includes(name)){showAlert("確認","同名が既に存在");return;}
+      cats.push(name); saveCats(cats); inp.value=""; renderCats(); rerenderAll();
+    });
+    toggle.addEventListener("click",()=>{
+      const open=body.style.display!=="none"; body.style.display=open?"none":"";
+      toggle.textContent=open?"区分マスター 表示":"区分マスター 非表示";
+    });
+    body.appendChild(row); body.appendChild(list);
+    panel.appendChild(toggle); panel.appendChild(body);
+    const mw=$("masterWrap_v5");
+    if(mw&&mw.parentNode) mw.parentNode.insertBefore(panel,mw.nextSibling);
+    else if(master&&master.parentNode) master.parentNode.insertBefore(panel,master.nextSibling);
+    renderCats();
+  }
 }
 
+/* ── エクスポート / インポート ── */
+function exportJSON() {
+  const payload={ version:4, exportedAt:new Date().toISOString(),
+    appName:loadAppName(), tasks:loadTasks(), rows:loadRows() };
+  const blob=new Blob([JSON.stringify(payload,null,2)],{type:"application/json"});
+  const url=URL.createObjectURL(blob), a=document.createElement("a");
+  a.href=url; a.download=`maintelog_backup_${todayISO()}.json`;
+  document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+}
 function importJSON(file) {
-  const reader = new FileReader();
-  reader.onload = () => {
+  const reader=new FileReader();
+  reader.onload=()=>{
     try {
-      const payload = JSON.parse(reader.result);
-      if (!payload || typeof payload !== "object") throw new Error("bad");
-
-      // appName optional
-      if (typeof payload.appName === "string") saveAppName(payload.appName);
-
-      // tasks
-      if (Array.isArray(payload.tasks)) {
-        const migrated = migrateTasks(payload.tasks);
-        if (migrated) saveTasks(migrated);
-      }
-
-      // rows
-      if (Array.isArray(payload.rows)) {
-        saveRows(payload.rows);
-      }
-
-      boot();
-      showAlert("確認", "復元完了");
-    } catch {
-      showAlert("確認", "読み込み失敗");
-    }
+      const p=JSON.parse(reader.result);
+      if(!p||typeof p!=="object") throw new Error("不正なファイル形式");
+      if(typeof p.version!=="number"||p.version<1||p.version>99) throw new Error("バージョン情報が不正");
+      if(!Array.isArray(p.rows))  throw new Error("rowsが配列ではありません");
+      if(!Array.isArray(p.tasks)) throw new Error("tasksが配列ではありません");
+      p.rows.forEach((r,i)=>{ if(typeof r!=="object"||r===null) throw new Error(`row[${i}]が不正`);
+        if(typeof r.date!=="string") throw new Error(`row[${i}].dateが不正`); });
+      if(typeof p.appName==="string") saveAppName(p.appName);
+      const m=migrateTasks(p.tasks); if(m) saveTasks(m);
+      saveRows(p.rows.map(r=>({id:r.id||genId(),...r})));
+      boot(); showAlert("確認","復元完了");
+    } catch(e) { showAlert("読み込み失敗",e.message); }
   };
   reader.readAsText(file);
 }
 
-/* view */
+/* ── ビュー切替 ── */
 function setView(which) {
-  const inputBtn = $("tabInput");
-  const histBtn = $("tabHistory");
-  const viewInput = $("viewInput");
-  const viewHistory = $("viewHistory");
-
-  const isInput = which === "input";
-  if (viewInput) viewInput.style.display = isInput ? "" : "none";
-  if (viewHistory) viewHistory.style.display = isInput ? "none" : "";
-
-  if (inputBtn) inputBtn.classList.toggle("active", isInput);
-  if (histBtn) histBtn.classList.toggle("active", !isInput);
-
-  if (!isInput) {
-    renderReco();
-    renderHistory();
-  }
+  const isInput=which==="input";
+  const vi=$("viewInput"), vh=$("viewHistory");
+  if(vi) vi.style.display=isInput?"":"none";
+  if(vh) vh.style.display=isInput?"none":"";
+  $("tabInput") .classList.toggle("active", isInput);
+  $("tabHistory").classList.toggle("active",!isInput);
+  if(!isInput){renderReco();renderHistory();}
 }
 
+/* ── 起動 ── */
 function boot() {
-  ensureDynamicStylesV5();
   ensureDefaultTasks();
-
-  $("date").value = todayISO();
-
-  applyAppName();
-  renderStatus();
-  renderTaskChips();
-  renderMaster();
-  renderReco();
-  renderHistory();
-  setView("input");
-  setupMasterCollapsiblesV5();
+  $("date").value=todayISO();
+  applyAppName(); renderStatus();
+  renderTaskChips(); renderMaster(); renderReco(); renderHistory();
+  setView("input"); setupMasterCollapsibles();
 }
 
-/* events */
-function bindIf(id, type, handler) {
-  const el = $(id);
-  if (el) el.addEventListener(type, handler);
-}
-
-bindIf("tabInput", "click", () => setView("input"));
-bindIf("tabHistory", "click", () => setView("history"));
-bindIf("footInput", "click", () => setView("input"));
-bindIf("footHistory", "click", () => setView("history"));
-bindIf("goInput", "click", () => setView("input"));
-
-bindIf("save", "click", () => {
-  const date = $("date").value || "";
-  const nights = normalizeIntOrNull($("nights").value);
-  const tasks = getSelectedTasks();
-  const other = $("other").value || "";
-
-  if (!date) {
-    showAlert("確認", "日付は必須");
-    return;
-  }
-  if (tasks.length === 0 && String(other).trim().length === 0 && (nights === null)) {
-    return;
-  }
-
-  addRow({ date, nights, tasks, other });
-  clearInput();
-  renderStatus();
+/* ── イベントバインド ── */
+function bindIf(id,type,fn){ const el=$(id); if(el) el.addEventListener(type,fn); }
+bindIf("tabInput",  "click",()=>setView("input"));
+bindIf("tabHistory","click",()=>setView("history"));
+bindIf("save","click",()=>{
+  const date=$("date").value||"", nights=normalizeIntOrNull($("nights").value);
+  const tasks=getSelectedTasks(), other=$("other").value||"";
+  if(!date){showAlert("確認","日付は必須");return;}
+  if(!tasks.length&&!String(other).trim()&&nights===null) return;
+  addRow({date,nights,tasks,other}); clearInput(); renderStatus();
 });
-
-bindIf("clear", "click", () => clearInput());
-
-bindIf("wipe", "click", () => {
-  showConfirm("確認","全データ削除", () => {
-    saveRows([]);
-    saveTasks(ensureDefaultTasks());
-    localStorage.removeItem(APPNAME_KEY);
-    boot();
-  }, () => {});
+bindIf("clear","click",()=>clearInput());
+bindIf("wipe","click",()=>{
+  showConfirm("確認","全データを削除します",()=>{
+    saveRows([]); saveTasks(ensureDefaultTasks()); localStorage.removeItem(APPNAME_KEY); boot();
+  },()=>{});
 });
-
-bindIf("addTask", "click", () => addTaskFromInputs());
-bindIf("newTask", "keydown", (e) => {
-  if (e.key === "Enter") {
-    e.preventDefault();
-    addTaskFromInputs();
-  }
-});
-
-bindIf("sortDesc", "click", () => { sortMode = "desc"; renderHistory(); });
-bindIf("sortAsc", "click", () => { sortMode = "asc"; renderHistory(); });
-
-bindIf("export", "click", () => exportJSON());
-bindIf("import", "change", (e) => {
-  const file = e.target.files && e.target.files[0];
-  if (!file) return;
-  importJSON(file);
-  e.target.value = "";
-});
-
-bindIf("saveAppName", "click", () => {
-  saveAppName($("appName").value);
-  applyAppName();
-  showAlert("確認", "保存完了");
-});
-bindIf("resetAppName", "click", () => {
-  localStorage.removeItem(APPNAME_KEY);
-  applyAppName();
-});
+bindIf("addTask","click",()=>addTaskFromInputs());
+bindIf("newTask","keydown",e=>{ if(e.key==="Enter"){e.preventDefault();addTaskFromInputs();} });
+bindIf("sortDesc","click",()=>{ sortMode="desc"; renderHistory(); $("sortDesc").classList.add("active"); $("sortAsc").classList.remove("active"); });
+bindIf("sortAsc", "click",()=>{ sortMode="asc";  renderHistory(); $("sortAsc").classList.add("active"); $("sortDesc").classList.remove("active"); });
+bindIf("export","click",()=>exportJSON());
+bindIf("import","change",e=>{ const f=e.target.files&&e.target.files[0]; if(!f)return; importJSON(f); e.target.value=""; });
+bindIf("saveAppName", "click",()=>{ saveAppName($("appName").value); applyAppName(); showAlert("確認","保存完了"); });
+bindIf("resetAppName","click",()=>{ localStorage.removeItem(APPNAME_KEY); applyAppName(); });
 
 boot();
