@@ -1,5 +1,10 @@
-/* maintelog sw v16c-2026-03-30 */
-const CACHE_NAME = "maintelog-v16c-2026-03-30";
+/* maintelog sw v17-20260401
+   ネットワーク優先（Network First）戦略
+   - 常に最新ファイルをネットワークから取得
+   - オフライン時のみキャッシュにフォールバック
+   - 古いキャッシュは全て削除
+*/
+const CACHE_NAME = "maintelog-v17-20260401";
 const CORE_ASSETS = [
   "./","./index.html","./app.js","./manifest.json",
   "./icon-192.png","./icon-512.png","./apple-touch-icon.png"
@@ -11,7 +16,7 @@ self.addEventListener("install", event => {
     const cache = await caches.open(CACHE_NAME);
     await Promise.allSettled(CORE_ASSETS.map(async url => {
       try {
-        const res = await fetch(new Request(url, { cache:"reload" }));
+        const res = await fetch(new Request(url, { cache:"no-store" }));
         if (res && res.ok) await cache.put(url, res.clone());
       } catch (_) {}
     }));
@@ -20,8 +25,9 @@ self.addEventListener("install", event => {
 
 self.addEventListener("activate", event => {
   event.waitUntil((async () => {
+    // 旧キャッシュを全て削除
     const keys = await caches.keys();
-    await Promise.all(keys.map(k => k===CACHE_NAME ? Promise.resolve() : caches.delete(k)));
+    await Promise.all(keys.map(k => caches.delete(k)));
     await self.clients.claim();
   })());
 });
@@ -29,23 +35,21 @@ self.addEventListener("activate", event => {
 self.addEventListener("fetch", event => {
   if (event.request.method !== "GET") return;
   const url = new URL(event.request.url);
+  if (url.origin !== self.location.origin) return;
 
-  if (url.origin === self.location.origin) {
-    /* 同一オリジン: Stale-while-revalidate */
-    event.respondWith((async () => {
+  // Network First: 常にネットワークを優先、失敗時のみキャッシュ
+  event.respondWith((async () => {
+    try {
+      const res = await fetch(event.request, { cache:"no-store" });
+      if (res && res.ok) {
+        const cache = await caches.open(CACHE_NAME);
+        cache.put(event.request, res.clone());
+      }
+      return res;
+    } catch (_) {
       const cache = await caches.open(CACHE_NAME);
       const cached = await cache.match(event.request, { ignoreSearch:true });
-      const fetchPromise = fetch(event.request).then(res => {
-        if (res && res.ok) cache.put(event.request, res.clone());
-        return res;
-      }).catch(() => null);
-      return cached || await fetchPromise || Response.error();
-    })());
-  } else {
-    /* 外部: ネットワーク優先 */
-    event.respondWith(fetch(event.request).catch(async () => {
-      const cache = await caches.open(CACHE_NAME);
-      return await cache.match(event.request) || Response.error();
-    }));
-  }
+      return cached || Response.error();
+    }
+  })());
 });

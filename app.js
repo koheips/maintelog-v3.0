@@ -1,4 +1,4 @@
-/* メンテログ app.js  v16c-2026-03-30
+/* メンテログ app.js  v17-20260401
    動的CSS注入を完全廃止 → 全スタイルはindex.htmlに集約
    主な変更:
    ・localStorage 超過を try-catch で保護
@@ -11,7 +11,7 @@
    ・作業内容マスターをドラッグ＆ドロップ並び替えに変更
 */
 
-const BUILD_ID  = "v16c-2026-03-30";
+const BUILD_ID  = "v17-20260401";
 console.info("[maintelog] build", BUILD_ID);
 
 const STORAGE_KEY = "maintelog_rows_v2";
